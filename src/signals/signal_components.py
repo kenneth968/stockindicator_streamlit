@@ -73,14 +73,15 @@ class HTFBiasDetector:
     def get_4h_bias(df: pd.DataFrame) -> str:
         if len(df) < 20:
             return "neutral"
-        
-        last_10 = df.tail(10)
-        swing_high = last_10['high'].idxmax()
-        swing_low = last_10['low'].idxmin()
 
-        if df['close'].iloc[-1] > df.loc[swing_high, 'high']:
+        last_10 = df.tail(10)
+        swing_high_val = last_10['high'].max()
+        swing_low_val = last_10['low'].min()
+        current_close = df['close'].iloc[-1]
+
+        if current_close > swing_high_val:
             return "bullish"
-        elif df['close'].iloc[-1] < df.loc[swing_low, 'low']:
+        elif current_close < swing_low_val:
             return "bearish"
         return "neutral"
 
