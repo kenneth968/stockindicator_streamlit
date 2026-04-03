@@ -183,6 +183,8 @@ class DataManager:
 
             # Normalize columns to match tvdatafeed format (lowercase)
             df.columns = [c.lower() for c in df.columns]
+            # Remove duplicate columns (can happen with MultiIndex flattening)
+            df = df.loc[:, ~df.columns.duplicated()]
             # Drop extra columns yfinance adds
             for col in ['dividends', 'stock splits', 'capital gains']:
                 if col in df.columns:
