@@ -35,14 +35,18 @@ class SignalEngine:
         session = SessionFilter.get_session(current_time)
 
         htf_4h = self.data_manager.get_data(symbol, exchange, "4H", 50)
-        if not htf_4h.empty:
+        if htf_4h is not None and not htf_4h.empty:
+            if htf_4h.index.tz is not None:
+                htf_4h.index = htf_4h.index.tz_localize(None)
             htf_4h = self.fvg_detector.detect(htf_4h)
             bias_4h = HTFBiasDetector.get_4h_bias(htf_4h)
         else:
             bias_4h = "neutral"
 
         htf_daily = self.data_manager.get_data(symbol, exchange, "1D", 30)
-        if not htf_daily.empty:
+        if htf_daily is not None and not htf_daily.empty:
+            if htf_daily.index.tz is not None:
+                htf_daily.index = htf_daily.index.tz_localize(None)
             htf_daily = self.fvg_detector.detect(htf_daily)
             bias_daily = HTFBiasDetector.get_daily_bias(htf_daily)
         else:
@@ -61,7 +65,7 @@ class SignalEngine:
         smt_div = None
         if latest_fvg:
             df_mes = self.data_manager.get_data("MES1!", exchange, interval, n_bars)
-            if not df_mes.empty:
+            if df_mes is not None and not df_mes.empty:
                 df_mes = self.fvg_detector.detect(df_mes)
                 smt_div = SMTDivergence.detect_divergence(df, df_mes)
                 if smt_div:
@@ -123,8 +127,8 @@ class SignalEngine:
 
     def run_backtest(self, symbol: str = "MNQ1!", exchange: str = "CME", interval: str = "1H",
                      start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict:
-        # Fetch historical price data
-        df = self.data_manager.get_data(symbol, exchange, interval, 500)
+        # Fetch all available historical price data
+        df = self.data_manager.get_data(symbol, exchange, interval, 5000)
         if df is None or df.empty:
             return {'error': f'No historical data available for {symbol} ({interval}). Check data source connection.'}
 
@@ -132,29 +136,31 @@ class SignalEngine:
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
 
-        # Filter by date range if provided
-        if start_date is not None:
-            df = df[df.index >= pd.Timestamp(start_date)]
-        if end_date is not None:
-            df = df[df.index <= pd.Timestamp(end_date)]
-
-        if len(df) < 50:
-            return {'error': f'Not enough data for backtest ({len(df)} bars available, need 50)'}
+        if len(df) < 60:
+            return {'error': f'Not enough data for backtest ({len(df)} bars available, need at least 60)'}
 
         # Also fetch correlated instrument for SMT
-        smt_symbol = "MES1!" if symbol == "MNQ1!" else "MNQ1!"
-        df_smt = self.data_manager.get_data(smt_symbol, exchange, interval, 500)
+        smt_symbol = "MES1!" if symbol in ("MNQ1!", "NQ1!") else "MNQ1!"
+        df_smt = self.data_manager.get_data(smt_symbol, exchange, interval, 5000)
+        if df_smt is not None and not df_smt.empty and df_smt.index.tz is not None:
+            df_smt.index = df_smt.index.tz_localize(None)
+        if df_smt is None:
+            df_smt = pd.DataFrame()
 
-        # Fetch HTF data
-        htf_4h = self.data_manager.get_data(symbol, exchange, "4H", 50)
-        if not htf_4h.empty:
+        # Fetch HTF data for bias
+        htf_4h = self.data_manager.get_data(symbol, exchange, "4H", 200)
+        if htf_4h is not None and not htf_4h.empty:
+            if htf_4h.index.tz is not None:
+                htf_4h.index = htf_4h.index.tz_localize(None)
             htf_4h = self.fvg_detector.detect(htf_4h)
             bias_4h = HTFBiasDetector.get_4h_bias(htf_4h)
         else:
             bias_4h = "neutral"
 
-        htf_daily = self.data_manager.get_data(symbol, exchange, "1D", 30)
-        if not htf_daily.empty:
+        htf_daily = self.data_manager.get_data(symbol, exchange, "1D", 200)
+        if htf_daily is not None and not htf_daily.empty:
+            if htf_daily.index.tz is not None:
+                htf_daily.index = htf_daily.index.tz_localize(None)
             htf_daily = self.fvg_detector.detect(htf_daily)
             bias_daily = HTFBiasDetector.get_daily_bias(htf_daily)
         else:
@@ -224,9 +230,18 @@ class SignalEngine:
             })
 
         if not signals:
-            return {'error': 'No signals generated during backtest period'}
+            return {'error': f'No signals generated during backtest period ({len(df)} bars analyzed)'}
 
         signals_df = pd.DataFrame(signals)
+
+        # Filter signals by date range
+        if start_date is not None:
+            signals_df = signals_df[signals_df['timestamp'] >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            signals_df = signals_df[signals_df['timestamp'] <= pd.Timestamp(end_date)]
+
+        if signals_df.empty:
+            return {'error': 'No signals in selected date range'}
         total = len(signals_df)
         won = len(signals_df[signals_df['profit'] > 0])
         lost = len(signals_df[signals_df['profit'] <= 0])
