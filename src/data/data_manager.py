@@ -161,10 +161,25 @@ class DataManager:
         period = self.YF_PERIOD_MAP.get(yf_interval, "60d")
 
         try:
-            ticker = yf.Ticker(yf_symbol)
-            df = ticker.history(period=period, interval=yf_interval)
+            # Try Ticker.history first, fall back to yf.download
+            df = None
+            try:
+                ticker = yf.Ticker(yf_symbol)
+                df = ticker.history(period=period, interval=yf_interval)
+            except Exception as e:
+                logger.warning(f"yfinance Ticker.history failed: {e}")
+
             if df is None or df.empty:
+                logger.info(f"Trying yf.download for {yf_symbol}")
+                df = yf.download(yf_symbol, period=period, interval=yf_interval, progress=False)
+
+            if df is None or df.empty:
+                logger.warning(f"yfinance returned no data for {yf_symbol}")
                 return None
+
+            # Flatten MultiIndex columns if present (yf.download can return these)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = [col[0] for col in df.columns]
 
             # Normalize columns to match tvdatafeed format (lowercase)
             df.columns = [c.lower() for c in df.columns]
@@ -180,7 +195,7 @@ class DataManager:
             if len(df) > n_bars:
                 df = df.tail(n_bars)
 
-            logger.info(f"yfinance returned {len(df)} bars for {yf_symbol} ({interval})")
+            logger.info(f"yfinance returned {len(df)} bars for {yf_symbol} ({yf_interval})")
             return df
         except Exception as e:
             logger.warning(f"yfinance fetch failed for {yf_symbol}: {e}")
@@ -207,17 +222,21 @@ class DataManager:
         session = self.Session()
         try:
             query = f"""
-                SELECT timestamp, open, high, low, close, volume 
-                FROM ohlcv_cache 
+                SELECT timestamp, open, high, low, close, volume
+                FROM ohlcv_cache
                 WHERE symbol = '{symbol}' AND interval = '{interval}'
-                ORDER BY timestamp DESC 
+                ORDER BY timestamp DESC
                 LIMIT {n_bars}
             """
             df = pd.read_sql(query, self.engine.connect())
-            if not df.empty:
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.sort_values('timestamp').set_index('timestamp')
+            if df.empty:
+                return None
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.sort_values('timestamp').set_index('timestamp')
             return df
+        except Exception as e:
+            logger.warning(f"Cache read failed: {e}")
+            return None
         finally:
             session.close()
 
