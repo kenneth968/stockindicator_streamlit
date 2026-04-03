@@ -45,6 +45,42 @@ class SignalRecord(Base):
 
 
 class DataManager:
+    # Map TradingView symbols to yfinance tickers
+    YF_SYMBOL_MAP = {
+        "MNQ1!": "NQ=F",
+        "MES1!": "ES=F",
+        "NQ1!": "NQ=F",
+        "ES1!": "ES=F",
+    }
+
+    # Map interval strings to yfinance format
+    YF_INTERVAL_MAP = {
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1H": "1h",
+        "2H": "2h",
+        "4H": "4h",
+        "1D": "1d",
+        "1W": "1wk",
+        "1M": "1mo",
+    }
+
+    # yfinance max period per interval (intraday limited to 60 days)
+    YF_PERIOD_MAP = {
+        "1m": "7d",
+        "5m": "60d",
+        "15m": "60d",
+        "30m": "60d",
+        "1h": "730d",
+        "2h": "730d",
+        "4h": "730d",
+        "1d": "max",
+        "1wk": "max",
+        "1mo": "max",
+    }
+
     def __init__(self, db_path: str = "data/trading.db", max_retries: int = 3):
         if not os.path.isabs(db_path):
             db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), db_path)
@@ -86,27 +122,69 @@ class DataManager:
         return mapping.get(interval_str, Interval.in_1_hour)
 
     def _fetch_with_retry(self, symbol: str, exchange: str, interval: str, n_bars: int) -> Optional[pd.DataFrame]:
+        # Try tvdatafeed first
         tv = self._get_tv_datafeed()
-        if tv is None:
+        if tv is not None:
+            interval_enum = self._convert_interval(interval)
+            for attempt in range(self.max_retries):
+                try:
+                    df = tv.get_hist(
+                        symbol=symbol,
+                        exchange=exchange,
+                        interval=interval_enum,
+                        n_bars=n_bars
+                    )
+                    if df is not None and not df.empty:
+                        return df
+                except Exception as e:
+                    logger.warning(f"tvdatafeed attempt {attempt + 1} failed for {symbol}: {e}")
+                    if attempt < self.max_retries - 1:
+                        time.sleep(2 ** attempt)
+
+        # Fall back to yfinance
+        logger.info(f"Trying yfinance fallback for {symbol}")
+        return self._fetch_yfinance(symbol, interval, n_bars)
+
+    def _fetch_yfinance(self, symbol: str, interval: str, n_bars: int) -> Optional[pd.DataFrame]:
+        try:
+            import yfinance as yf
+        except ImportError:
+            logger.warning("yfinance not installed")
             return None
 
-        interval_enum = self._convert_interval(interval)
+        yf_symbol = self.YF_SYMBOL_MAP.get(symbol)
+        if yf_symbol is None:
+            logger.warning(f"No yfinance mapping for symbol: {symbol}")
+            return None
 
-        for attempt in range(self.max_retries):
-            try:
-                df = tv.get_hist(
-                    symbol=symbol,
-                    exchange=exchange,
-                    interval=interval_enum,
-                    n_bars=n_bars
-                )
-                if df is not None and not df.empty:
-                    return df
-            except Exception as e:
-                logger.warning(f"Attempt {attempt + 1} failed for {symbol}: {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(2 ** attempt)
-        return None
+        yf_interval = self.YF_INTERVAL_MAP.get(interval, "1h")
+        period = self.YF_PERIOD_MAP.get(yf_interval, "60d")
+
+        try:
+            ticker = yf.Ticker(yf_symbol)
+            df = ticker.history(period=period, interval=yf_interval)
+            if df is None or df.empty:
+                return None
+
+            # Normalize columns to match tvdatafeed format (lowercase)
+            df.columns = [c.lower() for c in df.columns]
+            # Drop extra columns yfinance adds
+            for col in ['dividends', 'stock splits', 'capital gains']:
+                if col in df.columns:
+                    df = df.drop(columns=[col])
+
+            # Rename index to match expected format
+            df.index.name = 'datetime'
+
+            # Trim to requested bar count
+            if len(df) > n_bars:
+                df = df.tail(n_bars)
+
+            logger.info(f"yfinance returned {len(df)} bars for {yf_symbol} ({interval})")
+            return df
+        except Exception as e:
+            logger.warning(f"yfinance fetch failed for {yf_symbol}: {e}")
+            return None
 
     def get_data(self, symbol: str, exchange: str = "CME", interval: str = "1H", n_bars: int = 500) -> pd.DataFrame:
         cached = self._get_cached_data(symbol, interval, n_bars)
