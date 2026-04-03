@@ -101,7 +101,7 @@ class SignalEngine:
             'ohlcv': df.tail(50).reset_index().to_dict('records')
         }
 
-        if latest_fvg and score >= 60:
+        if latest_fvg and score >= 40:
             self.data_manager.save_signal({
                 'timestamp': current_time,
                 'symbol': symbol,
@@ -186,6 +186,8 @@ class SignalEngine:
                     smt_window = self.fvg_detector.detect(smt_window)
                     smt_div = SMTDivergence.detect_divergence(window_df, smt_window)
 
+            ifvg = self.fvg_detector.check_ifvg(window_df)
+
             score = SignalScorer.calculate_score(
                 fvg_present=True,
                 htf_bullish=bias_4h == "bullish" or bias_daily == "bullish",
@@ -193,10 +195,11 @@ class SignalEngine:
                 liquidity_sweep=liquidity_sweep,
                 order_block_overlap=ob_overlap,
                 smt_divergence=smt_div is not None,
-                session=session
+                session=session,
+                ifvg_present=ifvg is not None
             )
 
-            if score < 60:
+            if score < 40:
                 continue
 
             # Simple profit estimation: check if price moved in FVG direction
