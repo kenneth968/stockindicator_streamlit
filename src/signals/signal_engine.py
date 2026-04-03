@@ -86,7 +86,7 @@ class SignalEngine:
             'smt_divergence': smt_div,
             'score': score,
             'grade': SignalScorer.get_grade(score),
-            'ohlcv': df.tail(50).to_dict('records')
+            'ohlcv': df.tail(50).reset_index().to_dict('records')
         }
 
         if latest_fvg and score >= 60:

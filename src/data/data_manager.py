@@ -137,7 +137,8 @@ class DataManager:
             """
             df = pd.read_sql(query, self.engine.connect())
             if not df.empty:
-                df = df.sort_values('timestamp')
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df = df.sort_values('timestamp').set_index('timestamp')
             return df
         finally:
             session.close()
