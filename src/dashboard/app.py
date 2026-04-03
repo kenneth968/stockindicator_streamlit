@@ -70,8 +70,8 @@ def render_live_tab():
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0)
-        interval = st.selectbox("Interval", ["1m", "5m", "15m", "1H", "4H"], index=3)
+        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0, key="live_symbol")
+        interval = st.selectbox("Interval", ["1m", "5m", "15m", "1H", "4H"], index=3, key="live_interval")
 
     with col2:
         if st.button("🔄 Refresh", type="primary"):
@@ -152,9 +152,9 @@ def render_backtest_tab():
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0)
+        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0, key="bt_symbol")
     with col2:
-        days = st.selectbox("Period", [30, 90, 180, 365], index=3)
+        days = st.selectbox("Period", [30, 90, 180, 365], index=3, key="bt_period")
 
     if st.button("Run Backtest", type="primary"):
         with st.spinner("Running backtest..."):
