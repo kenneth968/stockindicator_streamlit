@@ -1,0 +1,8 @@
+streamlit>=1.28
+pandas>=2.0
+plotly>=5.18
+git+https://github.com/rongardF/tvdatafeed.git
+requests>=2.31
+sqlalchemy>=2.0
+numpy>=1.24
+ta>=0.7.9
