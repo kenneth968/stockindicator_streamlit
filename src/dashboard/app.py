@@ -1,7 +1,9 @@
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+_repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
 
 import streamlit as st
 import pandas as pd
@@ -262,7 +264,8 @@ def render_backtest_tab():
         with row2_col3:
             st.metric("Max Drawdown", f"{bt.get('max_drawdown', 0):.2f}")
         with row2_col4:
-            st.metric("Profit Factor", f"{bt.get('profit_factor', 0):.2f}")
+            pf = bt.get('profit_factor', 0)
+            st.metric("Profit Factor", "Inf" if pf == float('inf') else f"{pf:.2f}")
 
         row3_col1, row3_col2, row3_col3, row3_col4 = st.columns(4)
         with row3_col1:

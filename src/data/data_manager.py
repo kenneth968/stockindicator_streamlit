@@ -54,17 +54,24 @@ class DataManager:
     }
 
     # Map interval strings to yfinance format
+    # yfinance only supports up to 1h intraday; 2H/4H are resampled from 1h
     YF_INTERVAL_MAP = {
         "1m": "1m",
         "5m": "5m",
         "15m": "15m",
         "30m": "30m",
         "1H": "1h",
-        "2H": "2h",
-        "4H": "4h",
+        "2H": "1h",
+        "4H": "1h",
         "1D": "1d",
         "1W": "1wk",
         "1M": "1mo",
+    }
+
+    # Intervals that need resampling from 1h data
+    YF_RESAMPLE_MAP = {
+        "2H": "2h",
+        "4H": "4h",
     }
 
     # yfinance max period per interval (intraday limited to 60 days)
@@ -74,8 +81,6 @@ class DataManager:
         "15m": "60d",
         "30m": "60d",
         "1h": "730d",
-        "2h": "730d",
-        "4h": "730d",
         "1d": "max",
         "1wk": "max",
         "1mo": "max",
@@ -189,6 +194,17 @@ class DataManager:
             for col in ['dividends', 'stock splits', 'capital gains']:
                 if col in df.columns:
                     df = df.drop(columns=[col])
+
+            # Resample if needed (2H, 4H from 1h data)
+            resample_rule = self.YF_RESAMPLE_MAP.get(interval)
+            if resample_rule:
+                df = df.resample(resample_rule).agg({
+                    'open': 'first',
+                    'high': 'max',
+                    'low': 'min',
+                    'close': 'last',
+                    'volume': 'sum'
+                }).dropna()
 
             # Rename index to match expected format
             df.index.name = 'datetime'
