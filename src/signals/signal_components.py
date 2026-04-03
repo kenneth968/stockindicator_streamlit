@@ -75,9 +75,9 @@ class HTFBiasDetector:
             return "neutral"
 
         last_10 = df.tail(10)
-        swing_high_val = last_10['high'].max()
-        swing_low_val = last_10['low'].min()
-        current_close = df['close'].iloc[-1]
+        swing_high_val = float(last_10['high'].max())
+        swing_low_val = float(last_10['low'].min())
+        current_close = float(df['close'].iloc[-1])
 
         if current_close > swing_high_val:
             return "bullish"
@@ -89,13 +89,14 @@ class HTFBiasDetector:
     def get_daily_bias(df: pd.DataFrame) -> str:
         if len(df) < 2:
             return "neutral"
-        
-        daily_high = df['high'].max()
-        daily_low = df['low'].min()
-        
-        if df['close'].iloc[-1] > daily_high * 0.99:
+
+        daily_high = float(df['high'].max())
+        daily_low = float(df['low'].min())
+        current_close = float(df['close'].iloc[-1])
+
+        if current_close > daily_high * 0.99:
             return "bullish"
-        elif df['close'].iloc[-1] < daily_low * 1.01:
+        elif current_close < daily_low * 1.01:
             return "bearish"
         return "neutral"
 
