@@ -6,3 +6,4 @@ requests>=2.31
 sqlalchemy>=2.0
 numpy>=1.24
 ta>=0.7.9
+yfinance>=0.2.31
