@@ -16,6 +16,14 @@ from src.signals.signal_components import (
 
 
 class SignalEngine:
+    # SMT pairs: Nasdaq instruments pair with S&P instruments
+    SMT_PAIRS = {
+        "MNQ1!": "MES1!",
+        "NQ1!": "ES1!",
+        "MES1!": "MNQ1!",
+        "ES1!": "NQ1!",
+    }
+
     def __init__(self, db_path: str = "data/trading.db"):
         self.data_manager = DataManager(db_path)
         self.fvg_detector = FVGDetector()
@@ -63,8 +71,9 @@ class SignalEngine:
         ob_overlap = False
 
         smt_div = None
+        smt_symbol = self.SMT_PAIRS.get(symbol, "MES1!")
         if latest_fvg:
-            df_mes = self.data_manager.get_data("MES1!", exchange, interval, n_bars)
+            df_mes = self.data_manager.get_data(smt_symbol, exchange, interval, n_bars)
             if df_mes is not None and not df_mes.empty:
                 df_mes = self.fvg_detector.detect(df_mes)
                 smt_div = SMTDivergence.detect_divergence(df, df_mes)
@@ -140,31 +149,27 @@ class SignalEngine:
             return {'error': f'Not enough data for backtest ({len(df)} bars available, need at least 60)'}
 
         # Also fetch correlated instrument for SMT
-        smt_symbol = "MES1!" if symbol in ("MNQ1!", "NQ1!") else "MNQ1!"
+        smt_symbol = self.SMT_PAIRS.get(symbol, "MES1!")
         df_smt = self.data_manager.get_data(smt_symbol, exchange, interval, 5000)
         if df_smt is not None and not df_smt.empty and df_smt.index.tz is not None:
             df_smt.index = df_smt.index.tz_localize(None)
         if df_smt is None:
             df_smt = pd.DataFrame()
 
-        # Fetch HTF data for bias
-        htf_4h = self.data_manager.get_data(symbol, exchange, "4H", 200)
-        if htf_4h is not None and not htf_4h.empty:
-            if htf_4h.index.tz is not None:
-                htf_4h.index = htf_4h.index.tz_localize(None)
-            htf_4h = self.fvg_detector.detect(htf_4h)
-            bias_4h = HTFBiasDetector.get_4h_bias(htf_4h)
+        # Fetch HTF data for per-bar bias computation (avoid look-ahead)
+        htf_4h_raw = self.data_manager.get_data(symbol, exchange, "4H", 200)
+        if htf_4h_raw is not None and not htf_4h_raw.empty:
+            if htf_4h_raw.index.tz is not None:
+                htf_4h_raw.index = htf_4h_raw.index.tz_localize(None)
         else:
-            bias_4h = "neutral"
+            htf_4h_raw = None
 
-        htf_daily = self.data_manager.get_data(symbol, exchange, "1D", 200)
-        if htf_daily is not None and not htf_daily.empty:
-            if htf_daily.index.tz is not None:
-                htf_daily.index = htf_daily.index.tz_localize(None)
-            htf_daily = self.fvg_detector.detect(htf_daily)
-            bias_daily = HTFBiasDetector.get_daily_bias(htf_daily)
+        htf_daily_raw = self.data_manager.get_data(symbol, exchange, "1D", 200)
+        if htf_daily_raw is not None and not htf_daily_raw.empty:
+            if htf_daily_raw.index.tz is not None:
+                htf_daily_raw.index = htf_daily_raw.index.tz_localize(None)
         else:
-            bias_daily = "neutral"
+            htf_daily_raw = None
 
         # Walk forward through the data generating signals
         window = 50
@@ -180,6 +185,21 @@ class SignalEngine:
 
             current_time = window_df.index[-1]
             session = SessionFilter.get_session(current_time) if hasattr(current_time, 'hour') else "Off hours"
+
+            # Compute HTF bias using only data available up to current_time
+            bias_4h = "neutral"
+            if htf_4h_raw is not None:
+                htf_4h_slice = htf_4h_raw[htf_4h_raw.index <= current_time]
+                if len(htf_4h_slice) >= 20:
+                    htf_4h_slice = self.fvg_detector.detect(htf_4h_slice)
+                    bias_4h = HTFBiasDetector.get_4h_bias(htf_4h_slice)
+
+            bias_daily = "neutral"
+            if htf_daily_raw is not None:
+                htf_daily_slice = htf_daily_raw[htf_daily_raw.index <= current_time]
+                if len(htf_daily_slice) >= 2:
+                    htf_daily_slice = self.fvg_detector.detect(htf_daily_slice)
+                    bias_daily = HTFBiasDetector.get_daily_bias(htf_daily_slice)
 
             liquidity_sweep = LiquiditySweepDetector.has_recent_sweep(window_df)
             order_blocks = OrderBlockDetector.find_order_blocks(window_df)
@@ -250,7 +270,7 @@ class SignalEngine:
         profits = signals_df['profit']
         avg_win = float(profits[profits > 0].mean()) if won > 0 else 0.0
         avg_loss = float(profits[profits <= 0].mean()) if lost > 0 else 0.0
-        profit_factor = abs(avg_win * won / (avg_loss * lost)) if lost > 0 and avg_loss != 0 else 0.0
+        profit_factor = abs(avg_win * won / (avg_loss * lost)) if lost > 0 and avg_loss != 0 else float('inf') if won > 0 else 0.0
 
         # Cumulative P&L and drawdown
         cum_pnl = profits.cumsum()
@@ -277,7 +297,7 @@ class SignalEngine:
             'avg_profit': round(float(profits.mean()), 2),
             'avg_win': round(avg_win, 2),
             'avg_loss': round(avg_loss, 2),
-            'profit_factor': round(profit_factor, 2),
+            'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else float('inf'),
             'total_pnl': round(float(cum_pnl.iloc[-1]), 2),
             'max_drawdown': round(max_drawdown, 2),
             'sharpe_ratio': round(sharpe, 2),
