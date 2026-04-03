@@ -215,7 +215,7 @@ def render_live_tab():
             order_blocks=result.get('order_blocks', []),
             ifvg=result.get('ifvg')
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 def render_backtest_tab():
@@ -281,13 +281,13 @@ def render_backtest_tab():
             st.divider()
             st.subheader("Equity Curve")
             equity = signals_df['profit'].cumsum()
-            st.line_chart(equity, use_container_width=True)
+            st.line_chart(equity, width="stretch")
 
             st.divider()
             st.subheader("Signal History")
             st.dataframe(
                 signals_df[['timestamp', 'direction', 'fvg_type', 'session', 'score', 'profit']].tail(50),
-                use_container_width=True
+                width="stretch"
             )
 
 
@@ -311,7 +311,7 @@ def render_research_tab():
     if fill_stats.get('by_session'):
         session_df = pd.DataFrame(fill_stats['by_session'])
         if not session_df.empty:
-            st.dataframe(session_df, use_container_width=True)
+            st.dataframe(session_df, width="stretch")
     else:
         st.info("No session data available yet")
 
