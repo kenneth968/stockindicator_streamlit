@@ -238,9 +238,14 @@ def render_backtest_tab():
             )
 
             if 'error' in bt_result:
-                st.error(bt_result['error'])
+                st.session_state.backtest_result = None
+                st.session_state.backtest_error = bt_result['error']
             else:
                 st.session_state.backtest_result = bt_result
+                st.session_state.backtest_error = None
+
+    if hasattr(st.session_state, 'backtest_error') and st.session_state.backtest_error:
+        st.error(st.session_state.backtest_error)
 
     if hasattr(st.session_state, 'backtest_result') and st.session_state.backtest_result:
         bt = st.session_state.backtest_result

@@ -136,8 +136,18 @@ class SignalEngine:
 
     def run_backtest(self, symbol: str = "MNQ1!", exchange: str = "CME", interval: str = "1H",
                      start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict:
-        # Fetch all available historical price data
-        df = self.data_manager.get_data(symbol, exchange, interval, 5000)
+        # Determine how many bars to fetch based on interval and date range
+        interval_hours = {"1m": 1/60, "5m": 5/60, "15m": 0.25, "30m": 0.5,
+                          "1H": 1, "2H": 2, "4H": 4, "1D": 24, "1W": 168, "1M": 720}
+        hours_per_bar = interval_hours.get(interval, 1)
+        if start_date:
+            days_back = (datetime.now() - start_date).days
+        else:
+            days_back = 365
+        estimated_bars = min(int((days_back * 24) / hours_per_bar) + 100, 5000)
+
+        # Fetch historical price data
+        df = self.data_manager.get_data(symbol, exchange, interval, estimated_bars)
         if df is None or df.empty:
             return {'error': f'No historical data available for {symbol} ({interval}). Check data source connection.'}
 
@@ -150,7 +160,7 @@ class SignalEngine:
 
         # Also fetch correlated instrument for SMT
         smt_symbol = self.SMT_PAIRS.get(symbol, "MES1!")
-        df_smt = self.data_manager.get_data(smt_symbol, exchange, interval, 5000)
+        df_smt = self.data_manager.get_data(smt_symbol, exchange, interval, estimated_bars)
         if df_smt is not None and not df_smt.empty and df_smt.index.tz is not None:
             df_smt.index = df_smt.index.tz_localize(None)
         if df_smt is None:
@@ -174,6 +184,11 @@ class SignalEngine:
         # Walk forward through the data generating signals
         window = 50
         signals = []
+        # Cache HTF bias - recompute every 10 bars to avoid O(n^2) FVG detection
+        cached_bias_4h = "neutral"
+        cached_bias_daily = "neutral"
+        htf_recompute_interval = 10
+
         for i in range(window, len(df)):
             window_df = df.iloc[i - window:i + 1].copy()
             window_df = self.fvg_detector.detect(window_df)
@@ -186,20 +201,22 @@ class SignalEngine:
             current_time = window_df.index[-1]
             session = SessionFilter.get_session(current_time) if hasattr(current_time, 'hour') else "Off hours"
 
-            # Compute HTF bias using only data available up to current_time
-            bias_4h = "neutral"
-            if htf_4h_raw is not None:
-                htf_4h_slice = htf_4h_raw[htf_4h_raw.index <= current_time]
-                if len(htf_4h_slice) >= 20:
-                    htf_4h_slice = self.fvg_detector.detect(htf_4h_slice)
-                    bias_4h = HTFBiasDetector.get_4h_bias(htf_4h_slice)
+            # Recompute HTF bias periodically (avoids running FVG detect every bar)
+            if (i - window) % htf_recompute_interval == 0:
+                if htf_4h_raw is not None:
+                    htf_4h_slice = htf_4h_raw[htf_4h_raw.index <= current_time]
+                    if len(htf_4h_slice) >= 20:
+                        htf_4h_slice = self.fvg_detector.detect(htf_4h_slice)
+                        cached_bias_4h = HTFBiasDetector.get_4h_bias(htf_4h_slice)
 
-            bias_daily = "neutral"
-            if htf_daily_raw is not None:
-                htf_daily_slice = htf_daily_raw[htf_daily_raw.index <= current_time]
-                if len(htf_daily_slice) >= 2:
-                    htf_daily_slice = self.fvg_detector.detect(htf_daily_slice)
-                    bias_daily = HTFBiasDetector.get_daily_bias(htf_daily_slice)
+                if htf_daily_raw is not None:
+                    htf_daily_slice = htf_daily_raw[htf_daily_raw.index <= current_time]
+                    if len(htf_daily_slice) >= 2:
+                        htf_daily_slice = self.fvg_detector.detect(htf_daily_slice)
+                        cached_bias_daily = HTFBiasDetector.get_daily_bias(htf_daily_slice)
+
+            bias_4h = cached_bias_4h
+            bias_daily = cached_bias_daily
 
             liquidity_sweep = LiquiditySweepDetector.has_recent_sweep(window_df)
             order_blocks = OrderBlockDetector.find_order_blocks(window_df)
