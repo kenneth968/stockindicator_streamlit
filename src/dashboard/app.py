@@ -26,7 +26,8 @@ def init_session_state():
         st.session_state.auto_refresh = True
 
 
-def plot_candlestick(df: pd.DataFrame, fvgs: list = None) -> go.Figure:
+def plot_candlestick(df: pd.DataFrame, fvgs: list = None, sweeps: list = None,
+                     order_blocks: list = None, ifvg: dict = None) -> go.Figure:
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
@@ -40,6 +41,7 @@ def plot_candlestick(df: pd.DataFrame, fvgs: list = None) -> go.Figure:
         decreasing_line_color='#ef5350'
     ))
 
+    # FVG zones
     if fvgs:
         for fvg in fvgs:
             if pd.isna(fvg.get('high')) or pd.isna(fvg.get('low')):
@@ -50,16 +52,78 @@ def plot_candlestick(df: pd.DataFrame, fvgs: list = None) -> go.Figure:
                 y1=fvg['high'],
                 line_width=0,
                 fillcolor=color,
-                opacity=0.2,
+                opacity=0.15,
                 annotation_text=f"FVG {fvg['type']}",
-                annotation_position="top left"
+                annotation_position="top left",
+                annotation_font_size=9
             )
+
+    # IFVG zone
+    if ifvg and not pd.isna(ifvg.get('high')) and not pd.isna(ifvg.get('low')):
+        fig.add_hrect(
+            y0=ifvg['low'],
+            y1=ifvg['high'],
+            line_width=1,
+            line_dash="dash",
+            line_color="#ff9800",
+            fillcolor="#ff9800",
+            opacity=0.15,
+            annotation_text=f"IFVG {ifvg.get('direction', '')}",
+            annotation_position="top right",
+            annotation_font_size=9,
+            annotation_font_color="#ff9800"
+        )
+
+    # Order block zones
+    if order_blocks:
+        for ob in order_blocks:
+            if pd.isna(ob.get('high')) or pd.isna(ob.get('low')):
+                continue
+            color = '#2196f3' if ob['type'] == 'bullish' else '#9c27b0'
+            fig.add_hrect(
+                y0=ob['low'],
+                y1=ob['high'],
+                line_width=1,
+                line_dash="dot",
+                line_color=color,
+                fillcolor=color,
+                opacity=0.1,
+                annotation_text=f"OB {ob['type']}",
+                annotation_position="bottom left",
+                annotation_font_size=8,
+                annotation_font_color=color
+            )
+
+    # Liquidity sweep markers
+    if sweeps:
+        for sweep in sweeps:
+            ts = sweep.get('timestamp')
+            level = sweep.get('level')
+            if ts is None or level is None:
+                continue
+            is_buy = sweep['type'] == 'buy_stop_sweep'
+            fig.add_trace(go.Scatter(
+                x=[ts],
+                y=[level],
+                mode='markers+text',
+                marker=dict(
+                    symbol='triangle-down' if is_buy else 'triangle-up',
+                    size=12,
+                    color='#ff5722' if is_buy else '#4caf50'
+                ),
+                text=['BSL Sweep' if is_buy else 'SSL Sweep'],
+                textposition='top center' if not is_buy else 'bottom center',
+                textfont=dict(size=9, color='#ff5722' if is_buy else '#4caf50'),
+                name=sweep['type'],
+                showlegend=False
+            ))
 
     fig.update_layout(
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
-        height=500,
-        margin=dict(l=50, r=50, t=50, b=50)
+        height=600,
+        margin=dict(l=50, r=50, t=50, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
     return fig
 
@@ -70,8 +134,8 @@ def render_live_tab():
     col1, col2 = st.columns([3, 1])
 
     with col1:
-        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0, key="live_symbol")
-        interval = st.selectbox("Interval", ["1m", "5m", "15m", "1H", "4H"], index=3, key="live_interval")
+        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!", "NQ1!", "ES1!"], index=0, key="live_symbol")
+        interval = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1H", "2H", "4H", "1D"], index=4, key="live_interval")
 
     with col2:
         if st.button("🔄 Refresh", type="primary"):
@@ -111,6 +175,8 @@ def render_live_tab():
 
     with check_col2:
         st.subheader("🔍 Additional")
+        ifvg_check = "✅" if result.get('ifvg') else "❌"
+        st.write(f"{ifvg_check} IFVG Present")
         ob_check = "✅" if result['ob_overlap'] else "❌"
         st.write(f"{ob_check} OB-FVG Overlap")
         smt_check = "✅" if result['smt_divergence'] else "❌"
@@ -142,8 +208,13 @@ def render_live_tab():
         elif 'timestamp' in ohlcv_df.columns:
             ohlcv_df.set_index('timestamp', inplace=True)
 
-        fvgs_for_chart = [result['latest_fvg']] if result['latest_fvg'] else []
-        fig = plot_candlestick(ohlcv_df, fvgs_for_chart)
+        fig = plot_candlestick(
+            ohlcv_df,
+            fvgs=result.get('all_fvgs', []),
+            sweeps=result.get('liquidity_sweeps', []),
+            order_blocks=result.get('order_blocks', []),
+            ifvg=result.get('ifvg')
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 
@@ -152,7 +223,7 @@ def render_backtest_tab():
 
     col1, col2 = st.columns([2, 1])
     with col1:
-        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!"], index=0, key="bt_symbol")
+        symbol = st.selectbox("Symbol", ["MNQ1!", "MES1!", "NQ1!", "ES1!"], index=0, key="bt_symbol")
     with col2:
         days = st.selectbox("Period", [30, 90, 180, 365], index=3, key="bt_period")
 
@@ -173,22 +244,49 @@ def render_backtest_tab():
         bt = st.session_state.backtest_result
 
         st.divider()
-        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-        with stat_col1:
+        row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
+        with row1_col1:
             st.metric("Total Signals", bt['total_signals'])
-        with stat_col2:
+        with row1_col2:
+            st.metric("Win Rate", f"{bt['win_rate']}%")
+        with row1_col3:
+            st.metric("Total P&L", f"{bt.get('total_pnl', 0):.2f}")
+        with row1_col4:
+            st.metric("Sharpe Ratio", f"{bt.get('sharpe_ratio', 0):.2f}")
+
+        row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
+        with row2_col1:
+            st.metric("Avg Win", f"{bt.get('avg_win', 0):.2f}")
+        with row2_col2:
+            st.metric("Avg Loss", f"{bt.get('avg_loss', 0):.2f}")
+        with row2_col3:
+            st.metric("Max Drawdown", f"{bt.get('max_drawdown', 0):.2f}")
+        with row2_col4:
+            st.metric("Profit Factor", f"{bt.get('profit_factor', 0):.2f}")
+
+        row3_col1, row3_col2, row3_col3, row3_col4 = st.columns(4)
+        with row3_col1:
             st.metric("Wins", bt['winning_trades'])
-        with stat_col3:
+        with row3_col2:
             st.metric("Losses", bt['losing_trades'])
-        with stat_col4:
-            st.metric("Win Rate", f"{bt['win_rate']:.1f}%")
+        with row3_col3:
+            st.metric("Max Consec Wins", bt.get('max_consec_wins', 0))
+        with row3_col4:
+            st.metric("Max Consec Losses", bt.get('max_consec_losses', 0))
 
         if bt['signals']:
             signals_df = pd.DataFrame(bt['signals'])
+
+            # Equity curve
+            st.divider()
+            st.subheader("Equity Curve")
+            equity = signals_df['profit'].cumsum()
+            st.line_chart(equity, use_container_width=True)
+
             st.divider()
             st.subheader("Signal History")
             st.dataframe(
-                signals_df[['timestamp', 'direction', 'fvg_type', 'session', 'score', 'profit']].tail(20),
+                signals_df[['timestamp', 'direction', 'fvg_type', 'session', 'score', 'profit']].tail(50),
                 use_container_width=True
             )
 
@@ -250,7 +348,7 @@ def main():
         render_research_tab()
 
     st.divider()
-    st.caption("Data provided via tvdatafeed | Not financial advice")
+    st.caption("Data provided via tvdatafeed / yfinance | Not financial advice")
 
 
 if __name__ == "__main__":

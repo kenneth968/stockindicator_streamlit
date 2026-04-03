@@ -183,12 +183,16 @@ class SignalScorer:
         liquidity_sweep: bool,
         order_block_overlap: bool,
         smt_divergence: bool,
-        session: str
+        session: str,
+        ifvg_present: bool = False
     ) -> int:
         score = 0
 
         if fvg_present:
             score += 20
+
+        if ifvg_present:
+            score += 10
 
         if htf_bullish or htf_bearish:
             score += 20
@@ -200,16 +204,16 @@ class SignalScorer:
             score += 15
 
         if smt_divergence:
-            score += 15
+            score += 10
 
         session_quality = {
-            SessionFilter.NY: 15,
-            SessionFilter.LONDON: 12,
-            SessionFilter.OVERLAP: 15,
-            SessionFilter.ASIA: 8,
-            "Off hours": 5
+            SessionFilter.NY: 10,
+            SessionFilter.LONDON: 8,
+            SessionFilter.OVERLAP: 10,
+            SessionFilter.ASIA: 5,
+            "Off hours": 0
         }
-        score += session_quality.get(session, 5)
+        score += session_quality.get(session, 0)
 
         return min(score, 100)
 

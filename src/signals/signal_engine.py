@@ -1,4 +1,5 @@
 from typing import Optional, Dict, List
+from itertools import groupby
 import pandas as pd
 from datetime import datetime
 
@@ -24,6 +25,10 @@ class SignalEngine:
         if df.empty:
             return {'error': 'No data available'}
 
+        # Normalize timezone-aware index to naive for consistency
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
         df = self.fvg_detector.detect(df)
 
         current_time = df.index[-1] if hasattr(df.index[-1], 'hour') else datetime.now()
@@ -43,9 +48,12 @@ class SignalEngine:
         else:
             bias_daily = "neutral"
 
-        latest_fvg = self.fvg_detector.get_latest(df, n=3)
-        latest_fvg = latest_fvg[-1] if latest_fvg else None
+        all_fvgs = self.fvg_detector.get_latest(df, n=5)
+        latest_fvg = all_fvgs[-1] if all_fvgs else None
 
+        ifvg = self.fvg_detector.check_ifvg(df)
+
+        liquidity_sweeps = LiquiditySweepDetector.find_sweeps(df)
         liquidity_sweep = LiquiditySweepDetector.has_recent_sweep(df)
         order_blocks = OrderBlockDetector.find_order_blocks(df)
         ob_overlap = False
@@ -70,7 +78,8 @@ class SignalEngine:
             liquidity_sweep=liquidity_sweep,
             order_block_overlap=ob_overlap,
             smt_divergence=smt_div is not None,
-            session=session
+            session=session,
+            ifvg_present=ifvg is not None
         )
 
         result = {
@@ -80,7 +89,10 @@ class SignalEngine:
             'htf_4h_bias': bias_4h,
             'htf_daily_bias': bias_daily,
             'latest_fvg': latest_fvg,
+            'all_fvgs': all_fvgs,
+            'ifvg': ifvg,
             'liquidity_sweep': liquidity_sweep,
+            'liquidity_sweeps': liquidity_sweeps,
             'order_blocks': order_blocks[:3],
             'ob_overlap': ob_overlap,
             'smt_divergence': smt_div,
@@ -113,8 +125,12 @@ class SignalEngine:
                      start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> Dict:
         # Fetch historical price data
         df = self.data_manager.get_data(symbol, exchange, interval, 500)
-        if df.empty:
-            return {'error': 'No historical data available'}
+        if df is None or df.empty:
+            return {'error': f'No historical data available for {symbol} ({interval}). Check data source connection.'}
+
+        # Normalize index to timezone-naive for comparison
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
 
         # Filter by date range if provided
         if start_date is not None:
@@ -123,7 +139,7 @@ class SignalEngine:
             df = df[df.index <= pd.Timestamp(end_date)]
 
         if len(df) < 50:
-            return {'error': 'Not enough data for backtest'}
+            return {'error': f'Not enough data for backtest ({len(df)} bars available, need 50)'}
 
         # Also fetch correlated instrument for SMT
         smt_symbol = "MES1!" if symbol == "MNQ1!" else "MNQ1!"
@@ -210,14 +226,45 @@ class SignalEngine:
         signals_df = pd.DataFrame(signals)
         total = len(signals_df)
         won = len(signals_df[signals_df['profit'] > 0])
+        lost = len(signals_df[signals_df['profit'] <= 0])
         win_rate = (won / total * 100) if total > 0 else 0
+
+        profits = signals_df['profit']
+        avg_win = float(profits[profits > 0].mean()) if won > 0 else 0.0
+        avg_loss = float(profits[profits <= 0].mean()) if lost > 0 else 0.0
+        profit_factor = abs(avg_win * won / (avg_loss * lost)) if lost > 0 and avg_loss != 0 else 0.0
+
+        # Cumulative P&L and drawdown
+        cum_pnl = profits.cumsum()
+        running_max = cum_pnl.cummax()
+        drawdown = cum_pnl - running_max
+        max_drawdown = float(drawdown.min()) if len(drawdown) > 0 else 0.0
+
+        # Sharpe ratio (annualized, assuming ~252 trading days)
+        if profits.std() > 0:
+            sharpe = float((profits.mean() / profits.std()) * (252 ** 0.5))
+        else:
+            sharpe = 0.0
+
+        # Consecutive wins/losses
+        is_win = (profits > 0).astype(int)
+        max_consec_wins = max((len(list(g)) for k, g in groupby(is_win) if k == 1), default=0)
+        max_consec_losses = max((len(list(g)) for k, g in groupby(is_win) if k == 0), default=0)
 
         return {
             'total_signals': total,
             'winning_trades': won,
-            'losing_trades': total - won,
-            'win_rate': win_rate,
-            'avg_profit': round(signals_df['profit'].mean(), 2) if total > 0 else 0,
+            'losing_trades': lost,
+            'win_rate': round(win_rate, 1),
+            'avg_profit': round(float(profits.mean()), 2),
+            'avg_win': round(avg_win, 2),
+            'avg_loss': round(avg_loss, 2),
+            'profit_factor': round(profit_factor, 2),
+            'total_pnl': round(float(cum_pnl.iloc[-1]), 2),
+            'max_drawdown': round(max_drawdown, 2),
+            'sharpe_ratio': round(sharpe, 2),
+            'max_consec_wins': max_consec_wins,
+            'max_consec_losses': max_consec_losses,
             'signals': signals_df.to_dict('records')
         }
 
