@@ -1,0 +1,301 @@
+// This Pine Script™ source code is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// SMT A+ Signal System
+// Ports the full ICT/SMC signal engine: FVG, IFVG, Liquidity Sweeps, Order Blocks,
+// HTF Bias, SMT Divergence, Session Filter, and A+ Scoring.
+
+//@version=6
+indicator("SMT A+ Signal System", overlay=true, max_boxes_count=500, max_labels_count=500, max_lines_count=500)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ──────────────────────────────────────────────────────────────────────────────
+grp_general  = "General"
+i_smtSymbol  = input.symbol("ES1!", "SMT Comparison Symbol", group=grp_general, tooltip="The correlated instrument for SMT divergence (e.g. ES for NQ)")
+i_smtLookback = input.int(10, "SMT Lookback Bars", minval=3, maxval=50, group=grp_general)
+i_sweepLookback = input.int(20, "Liquidity Sweep Lookback", minval=5, maxval=100, group=grp_general)
+i_sweepRecent = input.int(5, "Recent Sweep Window (bars)", minval=2, maxval=20, group=grp_general)
+i_obLookback = input.int(50, "Order Block Lookback", minval=10, maxval=200, group=grp_general)
+i_scoreThreshold = input.int(40, "Min Score to Flag Signal", minval=0, maxval=100, group=grp_general)
+
+grp_display  = "Display"
+i_showFVG    = input.bool(true, "Show FVG Zones", group=grp_display)
+i_showIFVG   = input.bool(true, "Show IFVG Zones", group=grp_display)
+i_showOB     = input.bool(true, "Show Order Blocks", group=grp_display)
+i_showSweeps = input.bool(true, "Show Liquidity Sweeps", group=grp_display)
+i_showSession = input.bool(true, "Show Session Background", group=grp_display)
+i_showScore  = input.bool(true, "Show A+ Score Labels", group=grp_display)
+i_maxZones   = input.int(5, "Max FVG/OB Zones Displayed", minval=1, maxval=20, group=grp_display)
+
+grp_htf      = "HTF Bias"
+i_htfTF      = input.timeframe("240", "HTF Timeframe", group=grp_htf, tooltip="Timeframe for higher-timeframe bias (default 4H)")
+i_htfSwingLen = input.int(10, "HTF Swing Lookback", minval=5, maxval=50, group=grp_htf)
+
+grp_colors   = "Colors"
+i_bullFVGColor  = input.color(color.new(#26a69a, 80), "Bullish FVG", group=grp_colors)
+i_bearFVGColor  = input.color(color.new(#ef5350, 80), "Bearish FVG", group=grp_colors)
+i_ifvgColor     = input.color(color.new(#ff9800, 80), "IFVG Zone", group=grp_colors)
+i_bullOBColor   = input.color(color.new(#2196f3, 85), "Bullish OB", group=grp_colors)
+i_bearOBColor   = input.color(color.new(#9c27b0, 85), "Bearish OB", group=grp_colors)
+i_bslColor      = input.color(color.new(#ff5722, 0), "BSL Sweep", group=grp_colors)
+i_sslColor      = input.color(color.new(#4caf50, 0), "SSL Sweep", group=grp_colors)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FVG DETECTION (3-candle imbalance)
+// ──────────────────────────────────────────────────────────────────────────────
+// Bullish FVG: current bar's low > 2 bars ago high (gap up)
+bullFVG = low[1] > high[2]
+bullFVG_hi = math.min(high[2], high[0])
+bullFVG_lo = low[1]
+
+// Bearish FVG: current bar's high < 2 bars ago low (gap down)
+bearFVG = high[1] < low[2]
+bearFVG_hi = high[1]
+bearFVG_lo = math.max(low[2], low[0])
+
+isFVG = bullFVG or bearFVG
+fvgIsBullish = bullFVG
+
+// Track latest FVG values
+var float latestFVG_hi = na
+var float latestFVG_lo = na
+var bool  latestFVG_bull = false
+
+if bullFVG
+    latestFVG_hi := bullFVG_hi
+    latestFVG_lo := bullFVG_lo
+    latestFVG_bull := true
+else if bearFVG
+    latestFVG_hi := bearFVG_hi
+    latestFVG_lo := bearFVG_lo
+    latestFVG_bull := false
+
+// Draw FVG boxes
+var box[] fvgBoxes = array.new_box()
+if i_showFVG and bullFVG
+    if array.size(fvgBoxes) >= i_maxZones
+        box.delete(array.shift(fvgBoxes))
+    array.push(fvgBoxes, box.new(bar_index[1], bullFVG_lo, bar_index + 10, bullFVG_hi, border_color=color.new(#26a69a, 60), bgcolor=i_bullFVGColor, text="FVG Bull", text_size=size.tiny, text_color=color.new(#26a69a, 40)))
+
+if i_showFVG and bearFVG
+    if array.size(fvgBoxes) >= i_maxZones
+        box.delete(array.shift(fvgBoxes))
+    array.push(fvgBoxes, box.new(bar_index[1], bearFVG_lo, bar_index + 10, bearFVG_hi, border_color=color.new(#ef5350, 60), bgcolor=i_bearFVGColor, text="FVG Bear", text_size=size.tiny, text_color=color.new(#ef5350, 40)))
+
+// ──────────────────────────────────────────────────────────────────────────────
+// IFVG DETECTION (Inverse FVG - consecutive opposite FVGs)
+// ──────────────────────────────────────────────────────────────────────────────
+var bool  prevFVG_exists = false
+var bool  prevFVG_bull = false
+var float prevFVG_hi = na
+var float prevFVG_lo = na
+
+ifvgDetected = false
+ifvgIsBullish = false
+var float ifvg_hi = na
+var float ifvg_lo = na
+
+if isFVG
+    if prevFVG_exists and (fvgIsBullish != prevFVG_bull)
+        // Opposite FVG found - this is an IFVG
+        ifvgDetected := true
+        // IFVG direction is opposite to the latest FVG
+        ifvgIsBullish := not fvgIsBullish
+        currentHi = fvgIsBullish ? bullFVG_hi : bearFVG_hi
+        currentLo = fvgIsBullish ? bullFVG_lo : bearFVG_lo
+        ifvg_hi := math.min(currentHi, prevFVG_hi)
+        ifvg_lo := math.max(currentLo, prevFVG_lo)
+    // Update previous FVG tracker
+    prevFVG_exists := true
+    prevFVG_bull := fvgIsBullish
+    prevFVG_hi := fvgIsBullish ? bullFVG_hi : bearFVG_hi
+    prevFVG_lo := fvgIsBullish ? bullFVG_lo : bearFVG_lo
+
+// Draw IFVG
+var box[] ifvgBoxes = array.new_box()
+if i_showIFVG and ifvgDetected and not na(ifvg_hi) and not na(ifvg_lo) and ifvg_hi > ifvg_lo
+    if array.size(ifvgBoxes) >= i_maxZones
+        box.delete(array.shift(ifvgBoxes))
+    array.push(ifvgBoxes, box.new(bar_index, ifvg_lo, bar_index + 10, ifvg_hi, border_color=color.new(#ff9800, 50), border_style=line.style_dashed, bgcolor=i_ifvgColor, text="IFVG", text_size=size.tiny, text_color=color.new(#ff9800, 30)))
+
+// ──────────────────────────────────────────────────────────────────────────────
+// LIQUIDITY SWEEP DETECTION
+// ──────────────────────────────────────────────────────────────────────────────
+prevHighs = ta.highest(high, i_sweepLookback)[1]
+prevLows  = ta.lowest(low, i_sweepLookback)[1]
+
+bslSweep = high > prevHighs   // Buy-side liquidity sweep (stop hunt above)
+sslSweep = low < prevLows     // Sell-side liquidity sweep (stop hunt below)
+
+// Recent sweep check (any sweep in last N bars)
+recentSweep = false
+for j = 0 to i_sweepRecent - 1
+    if high[j] > ta.highest(high, i_sweepLookback)[j + 1] or low[j] < ta.lowest(low, i_sweepLookback)[j + 1]
+        recentSweep := true
+
+// Draw sweep markers
+if i_showSweeps and bslSweep
+    label.new(bar_index, high, "BSL", style=label.style_triangledown, color=i_bslColor, textcolor=color.white, size=size.tiny)
+if i_showSweeps and sslSweep
+    label.new(bar_index, low, "SSL", style=label.style_triangleup, color=i_sslColor, textcolor=color.white, size=size.tiny)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ORDER BLOCK DETECTION (bearish candle before bullish move, and vice versa)
+// ──────────────────────────────────────────────────────────────────────────────
+isBullOB = close > open and close[1] < open[1]  // Bullish candle after bearish
+isBearOB = close < open and close[1] > open[1]  // Bearish candle after bullish
+
+// Check OB-FVG overlap
+obFVGOverlap = false
+if isFVG
+    for k = 1 to math.min(i_obLookback, bar_index)
+        if k > 0
+            wasBullOB = close[k] > open[k] and (k + 1 <= bar_index ? close[k + 1] < open[k + 1] : false)
+            wasBearOB = close[k] < open[k] and (k + 1 <= bar_index ? close[k + 1] > open[k + 1] : false)
+            if fvgIsBullish and wasBullOB
+                obHigh = high[k]
+                obLow  = low[k]
+                if obHigh >= latestFVG_lo and obLow <= latestFVG_hi
+                    obFVGOverlap := true
+                    break
+            else if not fvgIsBullish and wasBearOB
+                obHigh = high[k]
+                obLow  = low[k]
+                if obHigh >= latestFVG_lo and obLow <= latestFVG_hi
+                    obFVGOverlap := true
+                    break
+
+// Draw order blocks
+var box[] obBoxes = array.new_box()
+if i_showOB and isBullOB
+    if array.size(obBoxes) >= i_maxZones
+        box.delete(array.shift(obBoxes))
+    array.push(obBoxes, box.new(bar_index, low, bar_index + 8, high, border_color=color.new(#2196f3, 50), border_style=line.style_dotted, bgcolor=i_bullOBColor, text="OB Bull", text_size=size.tiny, text_color=color.new(#2196f3, 40)))
+
+if i_showOB and isBearOB
+    if array.size(obBoxes) >= i_maxZones
+        box.delete(array.shift(obBoxes))
+    array.push(obBoxes, box.new(bar_index, low, bar_index + 8, high, border_color=color.new(#9c27b0, 50), border_style=line.style_dotted, bgcolor=i_bearOBColor, text="OB Bear", text_size=size.tiny, text_color=color.new(#9c27b0, 40)))
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HTF BIAS (higher timeframe swing structure)
+// ──────────────────────────────────────────────────────────────────────────────
+htfHigh  = request.security(syminfo.tickerid, i_htfTF, ta.highest(high, i_htfSwingLen))
+htfLow   = request.security(syminfo.tickerid, i_htfTF, ta.lowest(low, i_htfSwingLen))
+htfClose = request.security(syminfo.tickerid, i_htfTF, close)
+
+htfBullish = htfClose > htfHigh[1]
+htfBearish = htfClose < htfLow[1]
+htfAligned = htfBullish or htfBearish
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SMT DIVERGENCE (compare trend of this symbol vs correlated symbol)
+// ──────────────────────────────────────────────────────────────────────────────
+smtHigh = request.security(i_smtSymbol, timeframe.period, ta.highest(high, i_smtLookback))
+smtLow  = request.security(i_smtSymbol, timeframe.period, ta.lowest(low, i_smtLookback))
+
+// This symbol's trend: HH = bullish
+thisHH = ta.highest(high, i_smtLookback)
+thisLL = ta.lowest(low, i_smtLookback)
+thisTrendBull = high == thisHH  // making new highs
+thisTrendBear = low == thisLL   // making new lows
+
+// SMT symbol's trend
+smtTrendBull = request.security(i_smtSymbol, timeframe.period, high == ta.highest(high, i_smtLookback))
+smtTrendBear = request.security(i_smtSymbol, timeframe.period, low == ta.lowest(low, i_smtLookback))
+
+// Divergence: one makes new high/low while the other doesn't
+smtDivBullish = thisTrendBear and not smtTrendBear   // This sweeps low but SMT doesn't = bullish div
+smtDivBearish = thisTrendBull and not smtTrendBull   // This sweeps high but SMT doesn't = bearish div
+smtDivergence = smtDivBullish or smtDivBearish
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SESSION FILTER (UTC times)
+// ──────────────────────────────────────────────────────────────────────────────
+utcHour = hour(time, "UTC")
+
+isAsia    = utcHour >= 0 and utcHour < 8
+isLondon  = utcHour >= 8 and utcHour < 16
+isNY      = utcHour >= 13 and utcHour < 21
+isOverlap = isLondon and isNY
+
+// Session score
+sessionScore = isOverlap ? 10 : isNY ? 10 : isLondon ? 8 : isAsia ? 5 : 0
+
+// Session background
+sessionColor = isOverlap ? color.new(#ffeb3b, 95) : isNY ? color.new(#2196f3, 95) : isLondon ? color.new(#4caf50, 95) : isAsia ? color.new(#9c27b0, 95) : na
+bgcolor(i_showSession ? sessionColor : na, title="Session Background")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// A+ SIGNAL SCORING
+// ──────────────────────────────────────────────────────────────────────────────
+score = 0
+score += isFVG ? 20 : 0
+score += ifvgDetected ? 10 : 0
+score += htfAligned ? 20 : 0
+score += recentSweep ? 15 : 0
+score += obFVGOverlap ? 15 : 0
+score += smtDivergence ? 10 : 0
+score += sessionScore
+score := math.min(score, 100)
+
+// Grade
+grade = score >= 80 ? "A+" : score >= 60 ? "A" : score >= 40 ? "B" : score >= 20 ? "C" : "D"
+
+// Color by grade
+gradeColor = score >= 80 ? color.new(#00e676, 0) : score >= 60 ? color.new(#26a69a, 0) : score >= 40 ? color.new(#ffeb3b, 0) : score >= 20 ? color.new(#ff9800, 0) : color.new(#ef5350, 0)
+
+// Show score label on qualifying signals
+if i_showScore and isFVG and score >= i_scoreThreshold
+    lbl = grade + " (" + str.tostring(score) + ")"
+    yPos = fvgIsBullish ? low - ta.atr(14) * 0.5 : high + ta.atr(14) * 0.5
+    style = fvgIsBullish ? label.style_label_up : label.style_label_down
+    label.new(bar_index, yPos, lbl, style=style, color=gradeColor, textcolor=color.white, size=size.normal)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DASHBOARD TABLE
+// ──────────────────────────────────────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 9, bgcolor=color.new(#1e1e1e, 10), border_width=1, border_color=color.new(#333333, 0))
+
+if barstate.islast
+    check   = "✅"
+    nocheck = "❌"
+
+    sessionName = isOverlap ? "Overlap" : isNY ? "NY" : isLondon ? "London" : isAsia ? "Asia" : "Off"
+
+    table.cell(dash, 0, 0, "A+ Score", text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 0, grade + " (" + str.tostring(score) + ")", text_color=gradeColor, text_size=size.small)
+
+    table.cell(dash, 0, 1, "Session", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 1, sessionName, text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 2, "HTF Bias", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 2, (htfBullish ? check + " Bull" : htfBearish ? check + " Bear" : nocheck + " Neutral"), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 3, "FVG", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 3, (isFVG ? check : nocheck), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 4, "IFVG", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 4, (ifvgDetected ? check : nocheck), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 5, "Liq Sweep", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 5, (recentSweep ? check : nocheck), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 6, "OB-FVG Overlap", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 6, (obFVGOverlap ? check : nocheck), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 7, "SMT Divergence", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 7, (smtDivergence ? check : nocheck), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 8, "SMT Symbol", text_color=color.gray, text_size=size.tiny)
+    table.cell(dash, 1, 8, i_smtSymbol, text_color=color.white, text_size=size.tiny)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ALERTS
+// ──────────────────────────────────────────────────────────────────────────────
+alertcondition(isFVG and score >= 80, "A+ Signal (Score 80+)", "A+ Signal detected! Score: {{score}}")
+alertcondition(isFVG and score >= 60, "A Signal (Score 60+)", "A Signal detected! Score: {{score}}")
+alertcondition(isFVG and score >= 40, "B+ Signal (Score 40+)", "B+ Signal detected! Score: {{score}}")
+alertcondition(bslSweep, "Buy-Side Liquidity Sweep", "BSL Sweep detected")
+alertcondition(sslSweep, "Sell-Side Liquidity Sweep", "SSL Sweep detected")
+alertcondition(smtDivergence, "SMT Divergence", "SMT Divergence detected")
